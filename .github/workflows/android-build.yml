@@ -22,14 +22,15 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Setup Gradle & Wrapper JAR
+      - name: Setup Gradle CLI & Wrapper
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7.2'
 
-      - name: Ensure gradle-wrapper.jar exists
+      - name: Ensure gradlew and wrapper jar exist
         run: |
-          mkdir -p gradle/wrapper
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.7.2/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar || gradle wrapper --gradle-version 8.7.2
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            gradle wrapper --gradle-version 8.7.2 --distribution-type bin
           fi
           chmod +x gradlew
 
