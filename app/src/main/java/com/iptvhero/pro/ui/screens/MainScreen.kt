@@ -421,7 +421,8 @@ fun MainScreen(
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(if (isPlaying) Color(0xFF1D2942) else Color(0xCC121726))
                                     .heroFocusable(RoundedCornerShape(10.dp)) {
-                                        playChannelInPreview(channel.title, channel.streamUrl)
+                                    playChannelInPreview(channel.title, channel.url)
+                                        
                                     }
                                     .padding(12.dp)
                             ) {
