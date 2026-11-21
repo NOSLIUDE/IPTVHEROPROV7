@@ -414,7 +414,7 @@ fun MainScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         itemsIndexed(filteredChannels, key = { _, ch -> ch.id }) { _, channel ->
-                            val isPlaying = uiState.currentStreamUrl == channel.streamUrl && !channel.streamUrl.isNullOrBlank()
+                            val isPlaying = uiState.currentStreamUrl == channel.url && channel.url.isNotBlank()
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
