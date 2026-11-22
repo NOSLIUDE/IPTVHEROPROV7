@@ -945,13 +945,17 @@ fun MainScreen(
                         fontWeight = FontWeight.ExtraBold
                     )
 
-                    LazyColumn(
+                                        LazyColumn(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(7.dp)
                     ) {
-                        itemsIndexed(episodes, key = { _, ep -> "${activeSeason}_${ep.id}_${ep.episodeNum}" }) { epIndex, ep ->
+                        items(
+                            items = episodes,
+                            key = { ep: SeriesEpisode -> "${activeSeason}_${ep.id}_${ep.episodeNum}" }
+                        ) { ep: SeriesEpisode ->
+                            val epIndex = episodes.indexOf(ep).coerceAtLeast(0)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
