@@ -35,7 +35,15 @@ data class MainUiState(
     val pendingHeroHash: String? = null,
     val seasonsMap: Map<String, List<SeriesEpisode>> = emptyMap(),
     val isLoadingSeasons: Boolean = false,
-    val selectedSeriesTitle: String = ""
+    val selectedSeriesTitle: String = "",
+    val lastSelectedTab: String = "CANAIS",
+    val lastSelectedCategory: String = "",
+    val lastSearchQuery: String = "",
+    val lastFocusedIndex: Int = 0,
+    val lastOpenedChannelTitle: String = "",
+    val playbackPlaylistTitles: List<String> = emptyList(),
+    val playbackPlaylistUrls: List<String> = emptyList(),
+    val playbackIndex: Int = -1
 )
 
 class MainViewModel(
@@ -61,7 +69,47 @@ class MainViewModel(
     }
 
     init {
+        val savedTab = prefs.getString("last_selected_tab", "CANAIS") ?: "CANAIS"
+        val savedCat = prefs.getString("last_selected_category", "") ?: ""
+        val savedSearch = prefs.getString("last_search_query", "") ?: ""
+        val savedIndex = prefs.getInt("last_focused_index", 0)
+        val savedTitle = prefs.getString("last_opened_channel_title", "") ?: ""
+        _uiState.update {
+            it.copy(
+                lastSelectedTab = savedTab,
+                lastSelectedCategory = savedCat,
+                lastSearchQuery = savedSearch,
+                lastFocusedIndex = savedIndex,
+                lastOpenedChannelTitle = savedTitle
+            )
+        }
         loadActiveProfile()
+    }
+
+    fun saveNavigationHistory(
+        tab: String,
+        category: String,
+        search: String,
+        focusedIndex: Int,
+        openedTitle: String? = null
+    ) {
+        val titleToSave = openedTitle ?: _uiState.value.lastOpenedChannelTitle
+        prefs.edit()
+            .putString("last_selected_tab", tab)
+            .putString("last_selected_category", category)
+            .putString("last_search_query", search)
+            .putInt("last_focused_index", focusedIndex.coerceAtLeast(0))
+            .putString("last_opened_channel_title", titleToSave)
+            .apply()
+        _uiState.update {
+            it.copy(
+                lastSelectedTab = tab,
+                lastSelectedCategory = category,
+                lastSearchQuery = search,
+                lastFocusedIndex = focusedIndex.coerceAtLeast(0),
+                lastOpenedChannelTitle = titleToSave
+            )
+        }
     }
 
     fun loadActiveProfile() {
@@ -306,34 +354,80 @@ class MainViewModel(
         }
     }
 
-    fun openSeriesSeasons(seriesChannel: ChannelEntity) {
+    fun openSeriesSeasons(seriesChannel: ChannelEntity, allSeriesItems: List<ChannelEntity> = emptyList()) {
         val profile = activeProfile ?: return
-        val seriesId = seriesChannel.remoteId ?: return
+        val seriesId = seriesChannel.remoteId
         _uiState.update {
             it.copy(
                 isLoadingSeasons = true,
                 selectedSeriesTitle = seriesChannel.title,
-                seasonsMap = emptyMap()
+                seasonsMap = emptyMap(),
+                errorMessage = null
             )
         }
         viewModelScope.launch {
             try {
-                val seasons = repository.fetchSeriesSeasons(profile, seriesId)
+                if (!seriesId.isNullOrBlank() && !profile.server.isNullOrBlank()) {
+                    val seasons = repository.fetchSeriesSeasons(profile, seriesId)
+                    if (seasons.isNotEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                isLoadingSeasons = false,
+                                seasonsMap = seasons
+                            )
+                        }
+                        return@launch
+                    }
+                }
+
+                // Fallback para listas M3U ou séries já listadas por episódio (ex: "Nome S01E02")
+                val baseName = extractSeriesBaseTitle(seriesChannel.title)
+                val matching = allSeriesItems.filter {
+                    extractSeriesBaseTitle(it.title).equals(baseName, ignoreCase = true)
+                }.ifEmpty { listOf(seriesChannel) }
+
+                val grouped = linkedMapOf<String, MutableList<SeriesEpisode>>()
+                val seRegex = Regex("(?i)(?:S|T)(\\d{1,2})\\s*(?:E|EP)?(\\d{1,3})")
+                matching.forEachIndexed { idx, item ->
+                    val m = seRegex.find(item.title)
+                    val seasonKey = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.toString() ?: "1"
+                    val epNum = m?.groupValues?.getOrNull(2)?.toIntOrNull() ?: (idx + 1)
+                    val ext = item.url.substringAfterLast('.', "mp4").substringBefore('?').takeIf { it.length in 2..5 } ?: "mp4"
+                    grouped.getOrPut(seasonKey) { mutableListOf() }.add(
+                        SeriesEpisode(
+                            id = "DIRECT_URL::${item.url}",
+                            episodeNum = epNum,
+                            title = item.title,
+                            extension = ext,
+                            duration = null
+                        )
+                    )
+                }
+
+                val sortedSeasons = grouped.mapValues { (_, list) -> list.sortedBy { it.episodeNum } }
                 _uiState.update {
                     it.copy(
                         isLoadingSeasons = false,
-                        seasonsMap = seasons
+                        seasonsMap = sortedSeasons
                     )
                 }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isLoadingSeasons = false,
-                        errorMessage = "Erro ao carregar episodios: ${e.message}"
+                        errorMessage = "Erro ao carregar episodios: ${e.message ?: "Falha"}"
                     )
                 }
             }
         }
+    }
+
+    private fun extractSeriesBaseTitle(rawTitle: String): String {
+        return rawTitle
+            .replace(Regex("(?i)\\s*[-–:]?\\s*(?:S|T)\\d{1,2}\\s*(?:E|EP)?\\d{1,3}.*$"), "")
+            .replace(Regex("(?i)\\s*Temporada\\s*\\d+.*$"), "")
+            .trim()
+            .ifBlank { rawTitle.trim() }
     }
 
     fun closeSeriesSeasons() {
@@ -341,6 +435,9 @@ class MainViewModel(
     }
 
     fun buildEpisodeStreamUrl(episode: SeriesEpisode): String? {
+        if (episode.id.startsWith("DIRECT_URL::")) {
+            return episode.id.removePrefix("DIRECT_URL::")
+        }
         val profile = activeProfile ?: return null
         val cleanServer = profile.server?.trimEnd('/') ?: return null
         val encUser = URLEncoder.encode(profile.user.orEmpty(), "UTF-8")
@@ -353,7 +450,67 @@ class MainViewModel(
     }
 
     fun setStreamUrl(url: String?, title: String = "") {
-        _uiState.update { it.copy(currentStreamUrl = url, currentChannelTitle = title) }
+        _uiState.update {
+            it.copy(
+                currentStreamUrl = url,
+                currentChannelTitle = title,
+                playbackIndex = if (url.isNullOrBlank()) -1 else it.playbackIndex
+            )
+        }
+    }
+
+    fun startPlaylistPlayback(
+        titles: List<String>,
+        urls: List<String>,
+        startIndex: Int,
+        tab: String,
+        category: String,
+        search: String
+    ) {
+        if (urls.isEmpty() || startIndex !in urls.indices) return
+        val targetUrl = urls[startIndex]
+        val targetTitle = titles.getOrElse(startIndex) { "Canal ${startIndex + 1}" }
+        saveNavigationHistory(
+            tab = tab,
+            category = category,
+            search = search,
+            focusedIndex = startIndex,
+            openedTitle = targetTitle
+        )
+        _uiState.update {
+            it.copy(
+                currentStreamUrl = targetUrl,
+                currentChannelTitle = targetTitle,
+                playbackPlaylistTitles = titles,
+                playbackPlaylistUrls = urls,
+                playbackIndex = startIndex
+            )
+        }
+    }
+
+    fun stepChannel(delta: Int): Boolean {
+        val urls = _uiState.value.playbackPlaylistUrls
+        val titles = _uiState.value.playbackPlaylistTitles
+        val curIdx = _uiState.value.playbackIndex
+        if (urls.isEmpty() || curIdx !in urls.indices) return false
+        val nextIdx = (curIdx + delta + urls.size) % urls.size
+        val nextUrl = urls[nextIdx]
+        val nextTitle = titles.getOrElse(nextIdx) { "Canal ${nextIdx + 1}" }
+        saveNavigationHistory(
+            tab = _uiState.value.lastSelectedTab,
+            category = _uiState.value.lastSelectedCategory,
+            search = _uiState.value.lastSearchQuery,
+            focusedIndex = nextIdx,
+            openedTitle = nextTitle
+        )
+        _uiState.update {
+            it.copy(
+                currentStreamUrl = nextUrl,
+                currentChannelTitle = nextTitle,
+                playbackIndex = nextIdx
+            )
+        }
+        return true
     }
 }
 
