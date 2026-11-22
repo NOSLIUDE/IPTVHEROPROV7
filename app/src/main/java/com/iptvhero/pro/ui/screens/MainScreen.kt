@@ -1,52 +1,70 @@
 package com.iptvhero.pro.ui.screens
 
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
+import com.iptvhero.pro.data.local.ChannelEntity
+import com.iptvhero.pro.data.repository.SeriesEpisode
 import com.iptvhero.pro.ui.components.ProfileManagerDialog
 import com.iptvhero.pro.ui.components.heroFocusable
 import com.iptvhero.pro.ui.theme.DcCyan
@@ -56,6 +74,7 @@ import com.iptvhero.pro.ui.theme.MarvelYellow
 import com.iptvhero.pro.ui.theme.TextDim
 import com.iptvhero.pro.ui.theme.TextPrimary
 import com.iptvhero.pro.ui.viewmodel.MainViewModel
+import kotlinx.coroutines.launch
 
 @Composable
 fun MainScreen(
@@ -69,46 +88,105 @@ fun MainScreen(
     onExitApp: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val profiles by viewModel.profiles.collectAsState(initial = emptyList())
     val channels by viewModel.channels.collectAsState(initial = emptyList())
     val uiState by viewModel.uiState.collectAsState()
     val activeProfile = viewModel.activeProfile
 
-    var selectedTab by remember { mutableStateOf("CANAIS") }
-    var selectedCategory by remember { mutableStateOf("") }
+    var selectedTab by remember { mutableStateOf(uiState.lastSelectedTab) }
+    var selectedCategory by remember { mutableStateOf(uiState.lastSelectedCategory) }
     val categoryHistory = remember { mutableStateListOf<String>() }
-    var searchQuery by remember { mutableStateOf("") }
+    val focusHistoryByKey = remember { mutableStateMapOf<String, Int>() }
+    var searchQuery by remember { mutableStateOf(uiState.lastSearchQuery) }
     var showProfileDialog by remember { mutableStateOf(false) }
+    var isPlayerActive by remember { mutableStateOf(!uiState.currentStreamUrl.isNullOrBlank()) }
+    var selectedSeasonKey by remember { mutableStateOf("") }
+    var hasRestoredInitialHistory by remember { mutableStateOf(false) }
+    val lastFocusedItemRequester = remember { FocusRequester() }
 
-    val previewPlayer = remember {
+    val gridState = rememberLazyGridState()
+
+    val livePlayer = remember {
         ExoPlayer.Builder(context.applicationContext).build()
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            previewPlayer.release()
+            livePlayer.release()
+        }
+    }
+
+    LaunchedEffect(uiState.seasonsMap) {
+        if (uiState.seasonsMap.isNotEmpty() && !uiState.seasonsMap.containsKey(selectedSeasonKey)) {
+            selectedSeasonKey = uiState.seasonsMap.keys.first()
+        }
+    }
+
+    LaunchedEffect(channels.size, uiState.lastSelectedTab, uiState.lastSelectedCategory, uiState.lastFocusedIndex) {
+        if (!hasRestoredInitialHistory && channels.isNotEmpty()) {
+            val restTab = uiState.lastSelectedTab.ifBlank { "CANAIS" }
+            val restCat = uiState.lastSelectedCategory
+            val restSearch = uiState.lastSearchQuery
+            val restIndex = uiState.lastFocusedIndex.coerceAtLeast(0)
+            selectedTab = restTab
+            selectedCategory = restCat
+            searchQuery = restSearch
+            focusHistoryByKey["$restTab|$restCat"] = restIndex
+            gridState.scrollToItem(restIndex)
+            runCatching { lastFocusedItemRequester.requestFocus() }
+            hasRestoredInitialHistory = true
+        }
+    }
+
+    fun currentScopeKey(): String = "$selectedTab|$selectedCategory"
+
+    fun restoreScrollForScope(scopeKey: String) {
+        val savedIndex = focusHistoryByKey[scopeKey] ?: 0
+        coroutineScope.launch {
+            gridState.scrollToItem(savedIndex.coerceAtLeast(0))
         }
     }
 
     fun selectCategoryTracked(newCategory: String) {
+        focusHistoryByKey[currentScopeKey()] = gridState.firstVisibleItemIndex
         if (newCategory != selectedCategory) {
             categoryHistory.add(selectedCategory)
             selectedCategory = newCategory
         }
+        restoreScrollForScope("$selectedTab|$newCategory")
     }
 
     fun stopPlayback() {
-        previewPlayer.stop()
-        previewPlayer.clearMediaItems()
+        livePlayer.stop()
+        livePlayer.clearMediaItems()
+        isPlayerActive = false
         viewModel.setStreamUrl(null, "")
     }
 
-    fun playChannelInPreview(title: String, url: String?) {
-        if (url.isNullOrBlank()) return
-        viewModel.setStreamUrl(url, title)
-        previewPlayer.setMediaItem(MediaItem.fromUri(url.trim()))
-        previewPlayer.prepare()
-        previewPlayer.playWhenReady = true
+    fun startStreamPlayback(
+        url: String,
+        title: String,
+        playlistTitles: List<String> = listOf(title),
+        playlistUrls: List<String> = listOf(url),
+        startIndex: Int = 0,
+        openFullscreen: Boolean = true
+    ) {
+        if (url.isBlank()) return
+        livePlayer.stop()
+        livePlayer.playWhenReady = false
+        isPlayerActive = false
+        viewModel.startPlaylistPlayback(
+            titles = playlistTitles,
+            urls = playlistUrls,
+            startIndex = startIndex,
+            tab = selectedTab,
+            category = selectedCategory,
+            search = searchQuery
+        )
+        if (openFullscreen) {
+            onNavigateToFullPlayer()
+        }
     }
 
     val tabs = listOf("CANAIS", "FILMES", "SERIES")
@@ -131,38 +209,94 @@ fun MainScreen(
         else byCat.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
     }
 
+    fun handleItemClick(channel: ChannelEntity, index: Int) {
+        focusHistoryByKey[currentScopeKey()] = index
+        viewModel.saveNavigationHistory(
+            tab = selectedTab,
+            category = selectedCategory,
+            search = searchQuery,
+            focusedIndex = index,
+            openedTitle = channel.title
+        )
+        val isSeries = selectedTab == "SERIES" || channel.contentType.equals("SERIES", ignoreCase = true)
+        if (isSeries) {
+            selectedSeasonKey = ""
+            viewModel.openSeriesSeasons(channel, tabChannels)
+        } else {
+            val validItems = filteredChannels.filter { it.url.isNotBlank() }
+            val mappedIdx = validItems.indexOfFirst { it.id == channel.id }.coerceAtLeast(0)
+            startStreamPlayback(
+                url = channel.url,
+                title = channel.title,
+                playlistTitles = validItems.map { it.title },
+                playlistUrls = validItems.map { it.url },
+                startIndex = mappedIdx,
+                openFullscreen = true
+            )
+        }
+    }
+
+    fun playEpisode(episode: SeriesEpisode, seasonEpisodes: List<SeriesEpisode> = emptyList(), epIdx: Int = 0) {
+        val epUrl = viewModel.buildEpisodeStreamUrl(episode) ?: return
+        val fullTitle = "${uiState.selectedSeriesTitle} • T${selectedSeasonKey}E${episode.episodeNum} - ${episode.title}"
+        val titles = if (seasonEpisodes.isNotEmpty()) {
+            seasonEpisodes.map { "${uiState.selectedSeriesTitle} • T${selectedSeasonKey}E${it.episodeNum} - ${it.title}" }
+        } else listOf(fullTitle)
+        val urls = if (seasonEpisodes.isNotEmpty()) {
+            seasonEpisodes.mapNotNull { viewModel.buildEpisodeStreamUrl(it) }
+        } else listOf(epUrl)
+        val safeIdx = if (urls.size == titles.size && epIdx in urls.indices) epIdx else 0
+        viewModel.closeSeriesSeasons()
+        startStreamPlayback(
+            url = epUrl,
+            title = fullTitle,
+            playlistTitles = titles,
+            playlistUrls = urls,
+            startIndex = safeIdx,
+            openFullscreen = true
+        )
+    }
+
+    val isPosterTab = selectedTab == "FILMES" || selectedTab == "SERIES"
+    val gridColumnsCount = if (isPosterTab) 5 else 4
+    val totalItems = filteredChannels.size
+    val firstVisible = gridState.firstVisibleItemIndex
+    val scrollFraction = if (totalItems > gridColumnsCount) {
+        (firstVisible.toFloat() / totalItems.toFloat()).coerceIn(0f, 0.75f)
+    } else 0f
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(currentTheme.backgroundBrush)
-            .padding(14.dp)
+            .padding(12.dp)
     ) {
-        // 1. TOP BAR V7
+        // ZONA 1: TOPO (Título + Perfis, Proxy, Tema)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(currentTheme.headerBrush)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "IPTV HERO PRO • V6/7",
+                    text = "IPTV HERO PRO TV • V6/7",
                     color = Color.White,
                     fontWeight = FontWeight.Black,
                     fontSize = 17.sp
                 )
                 Text(
                     text = if (uiState.currentChannelTitle.isNotBlank()) {
-                        "Ativo: ${uiState.currentChannelTitle}"
+                        "Reproduzindo: ${uiState.currentChannelTitle}"
                     } else {
-                        activeProfile?.let { "Perfil: ${it.name} • ${filteredChannels.size} itens" }
-                            ?: "Sem perfil ativo • Abra Listas / M3U / Xtream"
+                        activeProfile?.let { "Perfil: ${it.name} • ${channels.size} itens" }
+                            ?: "Sem perfil ativo"
                     },
                     color = Color.White.copy(alpha = 0.88f),
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -171,144 +305,203 @@ fun MainScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(
                     modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color(0x8C0A0A16))
-                        .heroFocusable(CircleShape) { stopPlayback() }
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0x99090B14))
+                        .heroFocusable(RoundedCornerShape(10.dp)) { onBackToProfiles() }
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
-                    Text("PARAR", color = MarvelYellow, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color(0x8C0A0A16))
-                        .heroFocusable(CircleShape) {
-                            previewPlayer.playWhenReady = false
-                            onNavigateToFullPlayer()
-                        }
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                ) {
-                    Text("TELA CHEIA", color = DcCyan, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color(0x8C0A0A16))
-                        .heroFocusable(CircleShape) { showProfileDialog = true }
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                ) {
-                    Text("LISTAS / M3U / XTREAM", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color(0x8C0A0A16))
-                        .heroFocusable(CircleShape) { onCycleTheme() }
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
-                ) {
-                    Text("TEMA", color = MarvelYellow, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
+                    Text("Perfis", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
 
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0x8C0A0A16))
-                        .heroFocusable(RoundedCornerShape(10.dp)) { onBackToProfiles() }
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                        .background(Color(0x99090B14))
+                        .heroFocusable(RoundedCornerShape(10.dp)) { showProfileDialog = true }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
-                    Text(
-                        text = activeProfile?.name ?: "PERFIS",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text("Proxy", color = DcCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0x99090B14))
+                        .heroFocusable(RoundedCornerShape(10.dp)) { onCycleTheme() }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Text("Tema", color = MarvelYellow, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // 2. CORPO PRINCIPAL: SIDEBAR (ABAS + CATEGORIAS) + ÁREA CENTRAL (PREVIEW + BUSCA + GRADE)
+        // ZONA 2: ABAS (Canais, Filmes, Séries) + Barra de Pesquisa com fonte ajustada sem cortes
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xE60E1220))
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            tabs.forEach { tab ->
+                val isSelected = selectedTab == tab
+                val labelText = if (tab == "SERIES") "Séries" else tab.lowercase().replaceFirstChar { it.uppercase() }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) GoldFocus.copy(alpha = 0.22f) else Color(0xFF151C2E))
+                        .heroFocusable(RoundedCornerShape(8.dp)) {
+                            focusHistoryByKey[currentScopeKey()] = gridState.firstVisibleItemIndex
+                            selectedTab = tab
+                            selectedCategory = ""
+                            categoryHistory.clear()
+                            searchQuery = ""
+                            val targetIdx = focusHistoryByKey["$tab|"] ?: 0
+                            restoreScrollForScope("$tab|")
+                            viewModel.saveNavigationHistory(
+                                tab = tab,
+                                category = "",
+                                search = "",
+                                focusedIndex = targetIdx
+                            )
+                        }
+                        .padding(horizontal = 18.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = labelText,
+                        color = if (isSelected) GoldFocus else TextDim,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Campo de busca com altura livre e fonte menor (11.5.sp) para nunca cortar letras ao meio
+            Box(
+                modifier = Modifier
+                    .width(340.dp)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFF070912))
+                    .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(9.dp))
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                BasicTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = TextPrimary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 14.sp
+                    ),
+                    cursorBrush = SolidColor(GoldFocus),
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            if (searchQuery.isEmpty()) {
+                                Text(
+                                    text = "Pesquisar canal, filme ou série...",
+                                    color = TextDim,
+                                    fontSize = 11.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            innerTextField()
+                        }
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ZONA 3: CORPO PRINCIPAL (Categorias à Esquerda + Grade de Covers + Barra de Rolagem à Direita)
         Row(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // SIDEBAR ESQUERDA
+            // Barra Lateral de Categorias (D-Pad)
             Column(
                 modifier = Modifier
-                    .width(220.dp)
+                    .width(240.dp)
                     .fillMaxHeight()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xCC0D111C))
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xE60D111E))
                     .padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    tabs.forEach { tab ->
-                        val selected = selectedTab == tab
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (selected) GoldFocus.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f))
-                                .heroFocusable(RoundedCornerShape(8.dp)) {
-                                    selectedTab = tab
-                                    selectedCategory = ""
-                                    categoryHistory.clear()
-                                    searchQuery = ""
-                                }
-                                .padding(vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = tab,
-                                color = if (selected) GoldFocus else TextDim,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 10.sp,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
+                Text(
+                    text = "CATEGORIAS (D-PAD)",
+                    color = DcCyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
 
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     item {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (selectedCategory.isBlank()) GoldFocus.copy(alpha = 0.20f) else Color.Transparent)
-                                .heroFocusable(RoundedCornerShape(8.dp)) { selectCategoryTracked("") }
+                                .background(if (selectedCategory.isBlank()) GoldFocus.copy(alpha = 0.20f) else Color(0xFF141B2E))
+                                .heroFocusable(RoundedCornerShape(8.dp)) {
+                                    selectCategoryTracked("")
+                                    viewModel.saveNavigationHistory(
+                                        tab = selectedTab,
+                                        category = "",
+                                        search = searchQuery,
+                                        focusedIndex = focusHistoryByKey["$selectedTab|"] ?: 0
+                                    )
+                                }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Todas", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            Text("${tabChannels.size}", color = GoldFocus, fontSize = 12.sp)
+                            Text(
+                                text = "Todas",
+                                color = if (selectedCategory.isBlank()) GoldFocus else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text("${tabChannels.size}", color = GoldFocus, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
+
                     items(availableCategories.entries.toList()) { (catName, count) ->
                         val isCatSelected = selectedCategory.equals(catName, ignoreCase = true)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (isCatSelected) GoldFocus.copy(alpha = 0.20f) else Color.Transparent)
-                                .heroFocusable(RoundedCornerShape(8.dp)) { selectCategoryTracked(catName) }
+                                .background(if (isCatSelected) GoldFocus.copy(alpha = 0.20f) else Color(0xFF141B2E))
+                                .heroFocusable(RoundedCornerShape(8.dp)) {
+                                    selectCategoryTracked(catName)
+                                    viewModel.saveNavigationHistory(
+                                        tab = selectedTab,
+                                        category = catName,
+                                        search = searchQuery,
+                                        focusedIndex = focusHistoryByKey["$selectedTab|$catName"] ?: 0
+                                    )
+                                }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -320,182 +513,505 @@ fun MainScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text("$count", color = TextDim, fontSize = 11.sp)
                         }
                     }
                 }
+
+                Text(
+                    text = exitHintText ?: "Histórico D-Pad ativo • 3x Voltar sai",
+                    color = if (exitHintText != null) MarvelYellow else TextDim,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
             }
 
-            // ÁREA CENTRAL: MINI PREVIEW + BUSCA + GRADE
-            Column(
+            // Área Direita: Grade de Conteúdos (Covers) + Barra de Rolagem Lateral
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xE60D111E))
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .width(260.dp)
-                            .height(135.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color.Black)
-                    ) {
-                        if (!uiState.currentStreamUrl.isNullOrBlank()) {
+                    if (isPlayerActive && !uiState.currentStreamUrl.isNullOrBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(108.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF131A2C))
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
                             AndroidView(
                                 factory = { ctx ->
                                     PlayerView(ctx).apply {
-                                        player = previewPlayer
+                                        player = livePlayer
                                         useController = false
-                                        layoutParams = FrameLayout.LayoutParams(
-                                            ViewGroup.LayoutParams.MATCH_PARENT,
-                                            ViewGroup.LayoutParams.MATCH_PARENT
-                                        )
                                     }
                                 },
-                                update = { it.player = previewPlayer },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("Preview em espera", color = TextDim, fontSize = 12.sp)
-                            }
-                        }
-                    }
-
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        placeholder = { Text("Buscar canal, filme ou série...", color = TextDim, fontSize = 12.sp) },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(50.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = GoldFocus,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        )
-                    )
-                }
-
-                if (filteredChannels.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0x990D111C)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = uiState.errorMessage
-                                ?: if (uiState.isLoading) (uiState.successMessage ?: "Processando lista...")
-                                else "Nenhum item encontrado nesta aba/categoria.",
-                            color = if (uiState.errorMessage != null) MarvelYellow else TextDim,
-                            fontSize = 13.sp
-                        )
-                    }
-                } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        itemsIndexed(filteredChannels, key = { _, ch -> ch.id }) { _, channel ->
-                            val isPlaying = uiState.currentStreamUrl == channel.url && channel.url.isNotBlank()
-                            Column(
+                                update = { it.player = livePlayer },
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isPlaying) Color(0xFF1D2942) else Color(0xCC121726))
-                                    .heroFocusable(RoundedCornerShape(10.dp)) {
-                                    playChannelInPreview(channel.title, channel.url)
-                                        
-                                    }
-                                    .padding(12.dp)
-                            ) {
+                                    .width(176.dp)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color.Black)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = channel.groupName.ifBlank { selectedTab },
+                                    text = "REPRODUZINDO AGORA",
                                     color = DcCyan,
                                     fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = uiState.currentChannelTitle,
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = channel.title,
-                                    color = TextPrimary,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 2,
+                                    text = "Use STOP no rodapé para interromper ou FULL para tela cheia",
+                                    color = TextDim,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                     }
+
+                    if (filteredChannels.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = uiState.errorMessage
+                                    ?: if (uiState.isLoading) (uiState.successMessage ?: "Carregando lista...")
+                                    else "Nenhum conteúdo encontrado.",
+                                color = if (uiState.errorMessage != null) MarvelYellow else TextDim,
+                                fontSize = 13.sp
+                            )
+                        }
+                    } else {
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Fixed(gridColumnsCount),
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            itemsIndexed(filteredChannels, key = { _, ch -> ch.id }) { index, channel ->
+                                val isSelectedItem = uiState.currentChannelTitle == channel.title && isPlayerActive
+                                val isSeriesCard = selectedTab == "SERIES" || channel.contentType.equals("SERIES", ignoreCase = true)
+                                val isVodOrSeries = isPosterTab || isSeriesCard
+
+                                val isLastAccessed = index == uiState.lastFocusedIndex ||
+                                    channel.title.equals(uiState.lastOpenedChannelTitle, ignoreCase = true)
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            when {
+                                                isSelectedItem -> Color(0xFF19233E)
+                                                isLastAccessed -> Color(0xFF172038)
+                                                else -> Color(0xFF13192B)
+                                            }
+                                        )
+                                        .then(
+                                            if (index == uiState.lastFocusedIndex) {
+                                                Modifier.focusRequester(lastFocusedItemRequester)
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                        .heroFocusable(RoundedCornerShape(12.dp)) {
+                                            handleItemClick(channel, index)
+                                        }
+                                        .padding(8.dp)
+                                ) {
+                                    // Proporção ajustada: 2:3 (pôster) para Filmes/Séries e 16:9 para Canais, com ContentScale.Fit para não cortar imagem
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(if (isVodOrSeries) 0.72f else 1.65f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF0A0F1D)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (!channel.streamIcon.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = channel.streamIcon,
+                                                contentDescription = channel.title,
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .padding(if (isVodOrSeries) 2.dp else 6.dp)
+                                            )
+                                        } else {
+                                            Text(
+                                                text = channel.title.take(2).uppercase(),
+                                                color = if (isSelectedItem) MarvelYellow else DcCyan,
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.Black
+                                            )
+                                        }
+
+                                        if (isSeriesCard) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .clip(RoundedCornerShape(5.dp))
+                                                    .background(Color(0xCC0476F2))
+                                                    .padding(horizontal = 5.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(
+                                                    text = "SÉRIE",
+                                                    color = Color.White,
+                                                    fontSize = 8.5.sp,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    Text(
+                                        text = channel.title,
+                                        color = TextPrimary,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Text(
+                                        text = if (isSeriesCard) "OK: Temporadas e Episódios" else channel.groupName.ifBlank { selectedTab },
+                                        color = if (isSelectedItem || isSeriesCard) DcCyan else TextDim,
+                                        fontSize = 9.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Barra de rolagem vertical à direita (sem padding dinâmico de dp que possa estourar restrições de altura)
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .width(8.dp)
+                        .fillMaxHeight()
+                        .clip(CircleShape)
+                        .background(Color(0xFF1E263A))
+                ) {
+                    val thumbHeight = maxHeight * 0.25f
+                    val maxTravel = (maxHeight - thumbHeight).coerceAtLeast(0.dp)
+                    val offsetY = maxTravel * scrollFraction
+                    Box(
+                        modifier = Modifier
+                            .offset(y = offsetY)
+                            .fillMaxWidth()
+                            .height(thumbHeight)
+                            .clip(CircleShape)
+                            .background(DcCyan)
+                    )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // 3. FOOTER D-PAD COM HISTÓRICO E 3 TOQUES EM VOLTAR
+        // ZONA 4: RODAPÉ (HERO LISTA, Atualizar, STOP, Conexões Ativas, FULL)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(Color(0xCC0D111C))
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xE60E1220))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = exitHintText ?: "D-Pad: Navegue • OK: Reproduzir • Voltar: Categoria/Tela anterior (3x para sair)",
-                color = if (exitHintText != null) MarvelYellow else TextDim,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFFE62429))
+                    .heroFocusable(RoundedCornerShape(9.dp)) { viewModel.loadHeroListFromGithub() }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+            ) {
+                Text("HERO LISTA", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
+            }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.White.copy(alpha = 0.08f))
-                        .heroFocusable(RoundedCornerShape(8.dp)) {
-                            if (categoryHistory.isNotEmpty()) {
-                                selectedCategory = categoryHistory.removeAt(categoryHistory.lastIndex)
-                            } else {
-                                onTriggerBack()
-                            }
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFF1A2238))
+                    .heroFocusable(RoundedCornerShape(9.dp)) {
+                        activeProfile?.id?.let { viewModel.selectProfile(it) }
+                            ?: viewModel.loadHeroListFromGithub(force = true)
+                    }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+            ) {
+                Text("Atualizar", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFF3B1219))
+                    .heroFocusable(RoundedCornerShape(9.dp)) { stopPlayback() }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+            ) {
+                Text("STOP", color = Color(0xFFFF6B6E), fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFF090D16))
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            ) {
+                val activeConn = activeProfile?.activeConnections ?: if (isPlayerActive) 1 else 0
+                val maxConn = activeProfile?.maxConnections?.toString() ?: "∞"
+                Text(
+                    text = "Conexões Ativas: $activeConn / $maxConn",
+                    color = DcCyan,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color(0xFF0476F2))
+                    .heroFocusable(RoundedCornerShape(9.dp)) {
+                        livePlayer.playWhenReady = false
+                        onNavigateToFullPlayer()
+                    }
+                    .padding(horizontal = 16.dp, vertical = 7.dp)
+            ) {
+                Text("FULL", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
+            }
+        }
+    }
+
+    // MODAL DE SELEÇÃO DE TEMPORADAS E EPISÓDIOS DA SÉRIE (D-PAD)
+    if (uiState.selectedSeriesTitle.isNotBlank()) {
+        Dialog(
+            onDismissRequest = { viewModel.closeSeriesSeasons() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.84f)
+                    .fillMaxHeight(0.82f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xF50B0F1C))
+                    .border(1.5.dp, GoldFocus, RoundedCornerShape(16.dp))
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("VOLTAR", color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "SÉRIE SELECIONADA",
+                            color = DcCyan,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = uiState.selectedSeriesTitle,
+                            color = TextPrimary,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(Color(0xFF3B1219))
+                            .heroFocusable(RoundedCornerShape(9.dp)) { viewModel.closeSeriesSeasons() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text("FECHAR", color = Color(0xFFFF6B6E), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                    }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.White.copy(alpha = 0.08f))
-                        .heroFocusable(RoundedCornerShape(8.dp)) { onExitApp() }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text("SAIR", color = MarvelYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                if (uiState.isLoadingSeasons) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(color = GoldFocus)
+                            Text("Carregando temporadas e episódios...", color = TextDim, fontSize = 13.sp)
+                        }
+                    }
+                } else if (uiState.seasonsMap.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = uiState.errorMessage ?: "Nenhuma temporada ou episódio encontrado para esta série.",
+                            color = MarvelYellow,
+                            fontSize = 13.sp
+                        )
+                    }
+                } else {
+                    val seasonKeys = uiState.seasonsMap.keys.toList()
+                    val activeSeason = if (selectedSeasonKey in seasonKeys) selectedSeasonKey else seasonKeys.first()
+                    val episodes = uiState.seasonsMap[activeSeason].orEmpty()
+
+                    // Seletor horizontal de Temporadas
+                    Text(
+                        text = "TEMPORADAS (${seasonKeys.size})",
+                        color = GoldFocus,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(seasonKeys) { sKey ->
+                            val isSeasonSelected = sKey == activeSeason
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(if (isSeasonSelected) GoldFocus.copy(alpha = 0.25f) else Color(0xFF151C2E))
+                                    .heroFocusable(RoundedCornerShape(9.dp)) { selectedSeasonKey = sKey }
+                                    .padding(horizontal = 16.dp, vertical = 9.dp)
+                            ) {
+                                Text(
+                                    text = "Temporada $sKey",
+                                    color = if (isSeasonSelected) GoldFocus else TextPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+
+                    // Lista de Episódios da Temporada selecionada
+                    Text(
+                        text = "EPISÓDIOS • TEMPORADA $activeSeason (${episodes.size})",
+                        color = DcCyan,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        itemsIndexed(episodes, key = { _, ep -> "${activeSeason}_${ep.id}_${ep.episodeNum}" }) { epIndex, ep ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF141B2E))
+                                    .heroFocusable(RoundedCornerShape(10.dp)) { playEpisode(ep, episodes, epIndex) }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Color(0xFF1E2944))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "EP ${ep.episodeNum.toString().padStart(2, '0')}",
+                                            color = GoldFocus,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+
+                                    Text(
+                                        text = ep.title,
+                                        color = TextPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    if (!ep.duration.isNullOrBlank()) {
+                                        Text(
+                                            text = ep.duration,
+                                            color = TextDim,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                    Text(
+                                        text = "ASSISTIR ▶",
+                                        color = DcCyan,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
