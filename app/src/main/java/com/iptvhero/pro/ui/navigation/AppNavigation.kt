@@ -110,7 +110,9 @@ fun AppNavigation(
                     viewModel.dismissPendingHeroList()
                 },
                 onSelectProfile = { profileId ->
-                    viewModel.selectProfile(profileId)
+                    viewModel.selectProfile(profileId) {
+                        navigateTo("main")
+                    }
                 },
                 onDeleteProfile = { profileId ->
                     viewModel.deleteProfile(profileId)
@@ -135,6 +137,7 @@ fun AppNavigation(
             PlayerScreen(
                 streamUrl = uiState.currentStreamUrl,
                 channelTitle = uiState.currentChannelTitle,
+                onStepChannel = { delta -> viewModel.stepChannel(delta) },
                 onBack = {
                     viewModel.setStreamUrl(null, "")
                     currentScreen = "main"
