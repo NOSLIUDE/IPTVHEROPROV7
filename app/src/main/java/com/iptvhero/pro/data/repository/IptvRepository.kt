@@ -234,7 +234,11 @@ object PlaylistParser {
 class IptvRepository(
     private val profileDao: ProfileDao,
     private val channelDao: ChannelDao,
-    private val httpClient: OkHttpClient = OkHttpClient()
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
 ) {
     companion object {
         const val HERO_LIST_URL =
@@ -265,6 +269,9 @@ class IptvRepository(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * Baixa o arquivo remoto com cache-bust (?t=timestamp) igual ao heroUrlWithBust() do index_2.html
+     */
     suspend fun fetchHeroListRaw(url: String = HERO_LIST_URL): Pair<String, List<String>> =
         withContext(Dispatchers.IO) {
             val clean = url.trim()
@@ -285,6 +292,10 @@ class IptvRepository(
             Pair(text, urls)
         }
 
+    /**
+     * Processa um lote de linhas (igual ao processBulk / processOneBulkLine do index_2.html),
+     * criando 1 perfil por linha valida com nome de heroi Marvel/DC, validade, conexoes e contagens.
+     */
     suspend fun processBulkLines(
         rawLines: List<String>,
         isHeroOrigin: Boolean = true,
@@ -342,6 +353,9 @@ class IptvRepository(
         Pair(successCount.get(), failedCount.get())
     }
 
+    /**
+     * Identico ao processOneBulkLine(line) do index_2.html
+     */
     private suspend fun processSingleBulkLine(line: String, bulkOrigin: Boolean): String {
         val creds = PlaylistParser.detectXtreamPure(line)
         if (creds != null) {
@@ -402,6 +416,11 @@ class IptvRepository(
         throw IllegalStateException("Nao reconhecido")
     }
 
+    /**
+     * Identico ao bulkLoadXtream(server, user, pass) do index_2.html:
+     * Valida credenciais, extrai exp_date, max_connections e contagens de live/vod/series
+     * sem sobrecarregar o banco antes do usuario clicar no card do perfil.
+     */
     private suspend fun bulkLoadXtreamProfileOnly(
         server: String,
         user: String,
@@ -448,9 +467,17 @@ class IptvRepository(
         return "${hero.name} (XTREAM) - perfil salvo"
     }
 
-    suspend fun activateAndSyncProfile(profileId: Long): Int = withContext(Dispatchers.IO) {
+    /**
+     * Identico ao activateProfile(id) do index_2.html:
+     * Ativa o perfil e reconecta automaticamente se for Xtream ou M3U remoto.
+     */
+    suspend fun activateAndSyncProfile(
+        profileId: Long,
+        onStage: ((Float, String) -> Unit)? = null
+    ): Int = withContext(Dispatchers.IO) {
         val profile = profileDao.getProfileById(profileId) ?: return@withContext 0
         profileDao.setActiveProfile(profileId)
+        onStage?.invoke(0.15f, "Perfil ativado: ${profile.name}")
 
         if (profile.sourceType.equals("xtream", ignoreCase = true) &&
             !profile.server.isNullOrBlank() &&
@@ -461,38 +488,47 @@ class IptvRepository(
                 server = profile.server,
                 username = profile.user,
                 password = profile.pass,
-                existingProfileId = profile.id
+                existingProfileId = profile.id,
+                onStage = onStage
             )
         }
 
         if (profile.sourceType.equals("m3u", ignoreCase = true) &&
             profile.sourceLabel.startsWith("http", ignoreCase = true)
         ) {
-            return@withContext loadM3UUrlForProfile(profile.id, profile.sourceLabel)
+            return@withContext loadM3UUrlForProfile(profile.id, profile.sourceLabel, onStage)
         }
 
         if (profile.sourceType.equals("txt", ignoreCase = true) &&
             profile.sourceLabel.startsWith("http", ignoreCase = true)
         ) {
-            return@withContext loadM3UUrlForProfile(profile.id, profile.sourceLabel)
+            return@withContext loadM3UUrlForProfile(profile.id, profile.sourceLabel, onStage)
         }
 
+        onStage?.invoke(0.95f, "Contando itens salvos...")
         channelDao.countChannelsByProfile(profileId)
     }
 
-    suspend fun loadM3UUrlForProfile(profileId: Long, url: String): Int =
+    suspend fun loadM3UUrlForProfile(
+        profileId: Long,
+        url: String,
+        onStage: ((Float, String) -> Unit)? = null
+    ): Int =
         withContext(Dispatchers.IO) {
+            onStage?.invoke(0.25f, "Baixando lista...")
             val req = Request.Builder().url(url.trim()).build()
             val text = httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
                 resp.body?.string().orEmpty()
             }
+            onStage?.invoke(0.55f, "Processando canais, filmes e séries...")
             val items = if (text.contains("#EXTM3U") || text.contains("#EXTINF")) {
                 PlaylistParser.parseM3U(text)
             } else {
                 PlaylistParser.parseTXT(text)
             }
 
+            onStage?.invoke(0.75f, "Salvando ${items.size} itens no banco...")
             channelDao.deleteChannelsByProfile(profileId)
             if (items.isNotEmpty()) {
                 val entities = items.map {
@@ -506,9 +542,12 @@ class IptvRepository(
                         remoteId = it.remoteId
                     )
                 }
-                channelDao.insertChannels(entities)
+                entities.chunked(500).forEach { batch ->
+                    channelDao.insertChannels(batch)
+                }
             }
 
+            onStage?.invoke(0.92f, "Atualizando perfil...")
             profileDao.getProfileById(profileId)?.let { p ->
                 profileDao.updateProfile(
                     p.copy(
@@ -522,17 +561,22 @@ class IptvRepository(
             items.size
         }
 
+    /**
+     * Identico ao loadXtreamData(server, user, pass, existingProfileId) do index_2.html
+     */
     suspend fun loadXtreamData(
         server: String,
         username: String,
         password: String,
-        existingProfileId: Long? = null
+        existingProfileId: Long? = null,
+        onStage: ((Float, String) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         val cleanServer = server.trim().trimEnd('/')
         val encUser = URLEncoder.encode(username.trim(), "UTF-8")
         val encPass = URLEncoder.encode(password.trim(), "UTF-8")
         val base = "$cleanServer/player_api.php?username=$encUser&password=$encPass"
 
+        onStage?.invoke(0.20f, "Autenticando conta Xtream...")
         val authJson = fetchJsonObject(base)
         val userInfo = authJson?.optJSONObject("user_info")
         if (userInfo == null || userInfo.optInt("auth", 0) == 0) {
@@ -548,6 +592,8 @@ class IptvRepository(
         val vodItems = mutableListOf<PlaylistItem>()
         val seriesItems = mutableListOf<PlaylistItem>()
 
+        // 1. LIVE
+        onStage?.invoke(0.36f, "Carregando canais ao vivo (TV)...")
         runCatching {
             val cats = fetchJsonArray("$base&action=get_live_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_live_streams")
@@ -573,6 +619,8 @@ class IptvRepository(
             }
         }
 
+        // 2. VOD
+        onStage?.invoke(0.56f, "Carregando filmes (VOD)...")
         runCatching {
             val cats = fetchJsonArray("$base&action=get_vod_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_vod_streams")
@@ -599,6 +647,8 @@ class IptvRepository(
             }
         }
 
+        // 3. SERIES
+        onStage?.invoke(0.76f, "Carregando séries...")
         runCatching {
             val cats = fetchJsonArray("$base&action=get_series_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_series")
@@ -647,6 +697,7 @@ class IptvRepository(
         }
 
         val combined = liveItems + vodItems + seriesItems
+        onStage?.invoke(0.90f, "Salvando ${combined.size} itens (TV, Filmes e Séries)...")
         channelDao.deleteChannelsByProfile(targetProfileId)
         if (combined.isNotEmpty()) {
             val entities = combined.map {
@@ -660,7 +711,9 @@ class IptvRepository(
                     remoteId = it.remoteId
                 )
             }
-            channelDao.insertChannels(entities)
+            entities.chunked(500).forEach { batch ->
+                channelDao.insertChannels(batch)
+            }
         }
 
         profileDao.setActiveProfile(targetProfileId)
@@ -700,6 +753,9 @@ class IptvRepository(
         )
     }
 
+    /**
+     * Carrega temporadas e episodios via get_series_info (identico ao loadSeriesInfo do index_2.html)
+     */
     suspend fun fetchSeriesSeasons(
         profile: ProfileEntity,
         seriesId: String
@@ -753,6 +809,11 @@ class IptvRepository(
         result
     }
 
+    /**
+     * Exporta todos os perfis no formato exato do exportProfilesTXT() do index_2.html:
+     * sourceType|sourceLabel|server|user|pass|validity|maxConnections|hero|live|vod|series
+     */
+
     @Volatile
     private var cachedXmltvKey: String? = null
     @Volatile
@@ -801,6 +862,7 @@ class IptvRepository(
                 if (jsonItems.isNotEmpty()) return@withContext jsonItems
             }
 
+            // Fallback XMLTV quando get_short_epg não retorna itens ou quando a fonte é M3U/XMLTV
             fetchXmltvFallback(profile, resolvedId, channelTitle)
         }
 
