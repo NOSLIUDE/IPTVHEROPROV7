@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.iptvhero.pro.data.local.ChannelEntity
 import com.iptvhero.pro.data.local.ProfileEntity
 import com.iptvhero.pro.data.repository.BulkProgress
+import com.iptvhero.pro.data.repository.EpgProgramItem
 import com.iptvhero.pro.data.repository.IptvRepository
 import com.iptvhero.pro.data.repository.SeriesEpisode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -43,7 +44,10 @@ data class MainUiState(
     val lastOpenedChannelTitle: String = "",
     val playbackPlaylistTitles: List<String> = emptyList(),
     val playbackPlaylistUrls: List<String> = emptyList(),
-    val playbackIndex: Int = -1
+    val playbackPlaylistRemoteIds: List<String?> = emptyList(),
+    val playbackIndex: Int = -1,
+    val currentEpgItems: List<EpgProgramItem> = emptyList(),
+    val isLoadingEpg: Boolean = false
 )
 
 class MainViewModel(
@@ -387,7 +391,7 @@ class MainViewModel(
                 }.ifEmpty { listOf(seriesChannel) }
 
                 val grouped = linkedMapOf<String, MutableList<SeriesEpisode>>()
-                val seRegex = Regex("(?i)(?:S|T)(\\d{1,2})\\s*(?:E|EP)?(\\d{1,3})")
+                val seRegex = Regex("(?i)(?:S|T)(\d{1,2})\s*(?:E|EP)?(\d{1,3})")
                 matching.forEachIndexed { idx, item ->
                     val m = seRegex.find(item.title)
                     val seasonKey = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.toString() ?: "1"
@@ -424,8 +428,8 @@ class MainViewModel(
 
     private fun extractSeriesBaseTitle(rawTitle: String): String {
         return rawTitle
-            .replace(Regex("(?i)\\s*[-–:]?\\s*(?:S|T)\\d{1,2}\\s*(?:E|EP)?\\d{1,3}.*$"), "")
-            .replace(Regex("(?i)\\s*Temporada\\s*\\d+.*$"), "")
+            .replace(Regex("(?i)\s*[-–:]?\s*(?:S|T)\d{1,2}\s*(?:E|EP)?\d{1,3}.*$"), "")
+            .replace(Regex("(?i)\s*Temporada\s*\d+.*$"), "")
             .trim()
             .ifBlank { rawTitle.trim() }
     }
@@ -462,6 +466,7 @@ class MainViewModel(
     fun startPlaylistPlayback(
         titles: List<String>,
         urls: List<String>,
+        remoteIds: List<String?> = emptyList(),
         startIndex: Int,
         tab: String,
         category: String,
@@ -470,6 +475,7 @@ class MainViewModel(
         if (urls.isEmpty() || startIndex !in urls.indices) return
         val targetUrl = urls[startIndex]
         val targetTitle = titles.getOrElse(startIndex) { "Canal ${startIndex + 1}" }
+        val targetRemoteId = remoteIds.getOrNull(startIndex)
         saveNavigationHistory(
             tab = tab,
             category = category,
@@ -483,19 +489,24 @@ class MainViewModel(
                 currentChannelTitle = targetTitle,
                 playbackPlaylistTitles = titles,
                 playbackPlaylistUrls = urls,
-                playbackIndex = startIndex
+                playbackPlaylistRemoteIds = remoteIds,
+                playbackIndex = startIndex,
+                currentEpgItems = emptyList()
             )
         }
+        refreshEpgForCurrentStream(targetUrl, targetRemoteId, targetTitle)
     }
 
     fun stepChannel(delta: Int): Boolean {
         val urls = _uiState.value.playbackPlaylistUrls
         val titles = _uiState.value.playbackPlaylistTitles
+        val remoteIds = _uiState.value.playbackPlaylistRemoteIds
         val curIdx = _uiState.value.playbackIndex
         if (urls.isEmpty() || curIdx !in urls.indices) return false
         val nextIdx = (curIdx + delta + urls.size) % urls.size
         val nextUrl = urls[nextIdx]
         val nextTitle = titles.getOrElse(nextIdx) { "Canal ${nextIdx + 1}" }
+        val nextRemoteId = remoteIds.getOrNull(nextIdx)
         saveNavigationHistory(
             tab = _uiState.value.lastSelectedTab,
             category = _uiState.value.lastSelectedCategory,
@@ -507,10 +518,33 @@ class MainViewModel(
             it.copy(
                 currentStreamUrl = nextUrl,
                 currentChannelTitle = nextTitle,
-                playbackIndex = nextIdx
+                playbackIndex = nextIdx,
+                currentEpgItems = emptyList()
             )
         }
+        refreshEpgForCurrentStream(nextUrl, nextRemoteId, nextTitle)
         return true
+    }
+
+    fun refreshEpgForCurrentStream(
+        streamUrl: String?,
+        remoteId: String? = null,
+        channelTitle: String = ""
+    ) {
+        if (streamUrl.isNullOrBlank()) {
+            _uiState.update { it.copy(currentEpgItems = emptyList(), isLoadingEpg = false) }
+            return
+        }
+        _uiState.update { it.copy(isLoadingEpg = true) }
+        viewModelScope.launch {
+            val items = repository.fetchShortEpg(activeProfile, streamUrl, remoteId, channelTitle)
+            _uiState.update {
+                it.copy(
+                    currentEpgItems = items,
+                    isLoadingEpg = false
+                )
+            }
+        }
     }
 }
 
