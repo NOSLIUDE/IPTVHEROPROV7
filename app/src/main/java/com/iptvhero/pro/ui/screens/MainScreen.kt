@@ -200,34 +200,6 @@ fun MainScreen(
         }
     }
 
-    fun handleItemClick(channel: ChannelEntity, index: Int) {
-        focusHistoryByKey[currentScopeKey()] = index
-        viewModel.saveNavigationHistory(
-            tab = selectedTab,
-            category = selectedCategory,
-            search = searchQuery,
-            focusedIndex = index,
-            openedTitle = channel.title
-        )
-        val isSeries = selectedTab == "SERIES" || channel.contentType.equals("SERIES", ignoreCase = true)
-        if (isSeries) {
-            selectedSeasonKey = ""
-            viewModel.openSeriesSeasons(channel, tabChannels)
-        } else {
-            val validItems = filteredChannels.filter { it.url.isNotBlank() }
-            val mappedIdx = validItems.indexOfFirst { it.id == channel.id }.coerceAtLeast(0)
-            startStreamPlayback(
-                url = channel.url,
-                title = channel.title,
-                playlistTitles = validItems.map { it.title },
-                playlistUrls = validItems.map { it.url },
-                playlistRemoteIds = validItems.map { ch -> ch.remoteId },
-                startIndex = mappedIdx,
-                openFullscreen = true
-            )
-        }
-    }
-
     fun playEpisode(episode: SeriesEpisode, seasonEpisodes: List<SeriesEpisode> = emptyList(), epIdx: Int = 0) {
         val epUrl = viewModel.buildEpisodeStreamUrl(episode) ?: return
         val fullTitle = "${uiState.selectedSeriesTitle} • T${selectedSeasonKey}E${episode.episodeNum} - ${episode.title}"
@@ -258,6 +230,34 @@ fun MainScreen(
         else tabChannels.filter { it.groupName.equals(selectedCategory, ignoreCase = true) }
         if (searchQuery.isBlank()) byCat
         else byCat.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
+    }
+
+    fun handleItemClick(channel: ChannelEntity, index: Int) {
+        focusHistoryByKey[currentScopeKey()] = index
+        viewModel.saveNavigationHistory(
+            tab = selectedTab,
+            category = selectedCategory,
+            search = searchQuery,
+            focusedIndex = index,
+            openedTitle = channel.title
+        )
+        val isSeries = selectedTab == "SERIES" || channel.contentType.equals("SERIES", ignoreCase = true)
+        if (isSeries) {
+            selectedSeasonKey = ""
+            viewModel.openSeriesSeasons(channel, tabChannels)
+        } else {
+            val validItems = filteredChannels.filter { it.url.isNotBlank() }
+            val mappedIdx = validItems.indexOfFirst { it.id == channel.id }.coerceAtLeast(0)
+            startStreamPlayback(
+                url = channel.url,
+                title = channel.title,
+                playlistTitles = validItems.map { it.title },
+                playlistUrls = validItems.map { it.url },
+                playlistRemoteIds = validItems.map { ch -> ch.remoteId },
+                startIndex = mappedIdx,
+                openFullscreen = true
+            )
+        }
     }
 
     val isPosterTab = selectedTab == "FILMES" || selectedTab == "SERIES"
