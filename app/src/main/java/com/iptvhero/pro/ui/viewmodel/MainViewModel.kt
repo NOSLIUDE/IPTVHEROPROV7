@@ -147,35 +147,24 @@ class MainViewModel(
             )
         }
         viewModelScope.launch {
-            val progressJob = launch {
-                val stages = listOf(
-                    0.28f to "Carregando canais ao vivo (TV)...",
-                    0.56f to "Carregando filmes (VOD)...",
-                    0.82f to "Carregando séries e temporadas..."
-                )
-                var idx = 0
-                while (true) {
-                    kotlinx.coroutines.delay(550L)
-                    val (targetProg, stageText) = stages[idx % stages.size]
-                    _uiState.update { st ->
-                        if (!st.isLoading) st
-                        else {
-                            val nextP = if (st.loadingProgress < targetProg) targetProg else (st.loadingProgress + 0.04f).coerceAtMost(0.92f)
+            try {
+                val count = repository.activateAndSyncProfile(
+                    profileId = profileId,
+                    onStage = { progress, stageText ->
+                        val clamped = progress.coerceIn(0.05f, 0.98f)
+                        _uiState.update { st ->
                             st.copy(
-                                loadingProgress = nextP,
+                                isLoading = true,
+                                loadingProgress = clamped,
                                 loadingStage = stageText,
-                                profileLoadProgress = nextP,
+                                isProfileLoading = true,
+                                profileLoadProgress = clamped,
                                 profileLoadStage = stageText,
                                 successMessage = stageText
                             )
                         }
                     }
-                    idx++
-                }
-            }
-            try {
-                val count = repository.activateAndSyncProfile(profileId)
-                progressJob.cancel()
+                )
                 val active = repository.getActiveProfile()
                 activeProfile = active
                 activeProfileIdFlow.value = active?.id
@@ -192,7 +181,6 @@ class MainViewModel(
                 }
                 onReady?.invoke()
             } catch (e: Exception) {
-                progressJob.cancel()
                 loadActiveProfile()
                 _uiState.update {
                     it.copy(
