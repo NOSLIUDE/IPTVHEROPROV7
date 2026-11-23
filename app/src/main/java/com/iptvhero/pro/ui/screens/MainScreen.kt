@@ -43,10 +43,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
@@ -169,6 +169,7 @@ fun MainScreen(
         title: String,
         playlistTitles: List<String> = listOf(title),
         playlistUrls: List<String> = listOf(url),
+        playlistRemoteIds: List<String?> = emptyList(),
         startIndex: Int = 0,
         openFullscreen: Boolean = true
     ) {
@@ -179,6 +180,7 @@ fun MainScreen(
         viewModel.startPlaylistPlayback(
             titles = playlistTitles,
             urls = playlistUrls,
+            remoteIds = playlistRemoteIds,
             startIndex = startIndex,
             tab = selectedTab,
             category = selectedCategory,
@@ -196,17 +198,6 @@ fun MainScreen(
             "SERIES" -> channels.filter { it.contentType.equals("SERIES", ignoreCase = true) }
             else -> channels.filter { it.contentType.equals("LIVE", ignoreCase = true) }
         }
-    }
-
-    val availableCategories = remember(tabChannels) {
-        tabChannels.groupingBy { it.groupName.ifBlank { "Geral" } }.eachCount().toSortedMap()
-    }
-
-    val filteredChannels = remember(tabChannels, selectedCategory, searchQuery) {
-        val byCat = if (selectedCategory.isBlank()) tabChannels
-        else tabChannels.filter { it.groupName.equals(selectedCategory, ignoreCase = true) }
-        if (searchQuery.isBlank()) byCat
-        else byCat.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
     }
 
     fun handleItemClick(channel: ChannelEntity, index: Int) {
@@ -230,6 +221,7 @@ fun MainScreen(
                 title = channel.title,
                 playlistTitles = validItems.map { it.title },
                 playlistUrls = validItems.map { it.url },
+                playlistRemoteIds = validItems.map { it.remoteId },
                 startIndex = mappedIdx,
                 openFullscreen = true
             )
@@ -255,6 +247,17 @@ fun MainScreen(
             startIndex = safeIdx,
             openFullscreen = true
         )
+    }
+
+    val availableCategories = remember(tabChannels) {
+        tabChannels.groupingBy { it.groupName.ifBlank { "Geral" } }.eachCount().toSortedMap()
+    }
+
+    val filteredChannels = remember(tabChannels, selectedCategory, searchQuery) {
+        val byCat = if (selectedCategory.isBlank()) tabChannels
+        else tabChannels.filter { it.groupName.equals(selectedCategory, ignoreCase = true) }
+        if (searchQuery.isBlank()) byCat
+        else byCat.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
     }
 
     val isPosterTab = selectedTab == "FILMES" || selectedTab == "SERIES"
@@ -596,6 +599,53 @@ fun MainScreen(
                         }
                     }
 
+                    if (uiState.isLoading) {
+                        val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+                            targetValue = uiState.loadingProgress.coerceIn(0.05f, 1f),
+                            animationSpec = androidx.compose.animation.core.tween(durationMillis = 350),
+                            label = "profile_load_progress"
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = uiState.loadingStage.ifBlank {
+                                        uiState.successMessage ?: "Carregando canais, filmes e séries..."
+                                    },
+                                    color = DcCyan,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "${(animatedProgress * 100).toInt()}%",
+                                    color = MarvelYellow,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { animatedProgress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(7.dp)
+                                    .clip(RoundedCornerShape(99.dp)),
+                                color = DcCyan,
+                                trackColor = Color.White.copy(alpha = 0.14f)
+                            )
+                        }
+                    }
+
                     if (filteredChannels.isEmpty()) {
                         Box(
                             modifier = Modifier
@@ -603,13 +653,33 @@ fun MainScreen(
                                 .fillMaxWidth(),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = uiState.errorMessage
-                                    ?: if (uiState.isLoading) (uiState.successMessage ?: "Carregando lista...")
-                                    else "Nenhum conteúdo encontrado.",
-                                color = if (uiState.errorMessage != null) MarvelYellow else TextDim,
-                                fontSize = 13.sp
-                            )
+                            if (uiState.isLoading) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.75f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color(0xB80A0E1A))
+                                        .padding(20.dp)
+                                ) {
+                                    CircularProgressIndicator(color = DcCyan)
+                                    Text(
+                                        text = uiState.loadingStage.ifBlank {
+                                            uiState.successMessage ?: "Carregando canais, filmes e séries..."
+                                        },
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = uiState.errorMessage ?: "Nenhum conteúdo encontrado.",
+                                    color = if (uiState.errorMessage != null) MarvelYellow else TextDim,
+                                    fontSize = 13.sp
+                                )
+                            }
                         }
                     } else {
                         LazyVerticalGrid(
@@ -815,7 +885,22 @@ fun MainScreen(
                     .background(Color(0xFF0476F2))
                     .heroFocusable(RoundedCornerShape(9.dp)) {
                         livePlayer.playWhenReady = false
-                        onNavigateToFullPlayer()
+                        val activeUrl = uiState.currentStreamUrl ?: filteredChannels.firstOrNull()?.url
+                        val activeTitle = uiState.currentChannelTitle.ifBlank {
+                            filteredChannels.firstOrNull { it.url == activeUrl }?.title ?: "Canal"
+                        }
+                        val activeRemoteId = filteredChannels.firstOrNull { it.url == activeUrl }?.remoteId
+                        if (!activeUrl.isNullOrBlank()) {
+                            startStreamPlayback(
+                                url = activeUrl,
+                                title = activeTitle,
+                                playlistRemoteIds = listOf(activeRemoteId),
+                                startIndex = 0,
+                                openFullscreen = true
+                            )
+                        } else {
+                            onNavigateToFullPlayer()
+                        }
                     }
                     .padding(horizontal = 16.dp, vertical = 7.dp)
             ) {
@@ -945,7 +1030,7 @@ fun MainScreen(
                         fontWeight = FontWeight.ExtraBold
                     )
 
-                                        LazyColumn(
+                    LazyColumn(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
