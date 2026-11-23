@@ -11,11 +11,15 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -48,6 +52,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import com.iptvhero.pro.data.repository.EpgProgramItem
 import com.iptvhero.pro.ui.components.heroFocusable
 import kotlinx.coroutines.delay
 
@@ -55,6 +60,8 @@ import kotlinx.coroutines.delay
 fun PlayerScreen(
     streamUrl: String?,
     channelTitle: String,
+    epgItems: List<EpgProgramItem> = emptyList(),
+    isLoadingEpg: Boolean = false,
     onStepChannel: (Int) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -97,10 +104,10 @@ fun PlayerScreen(
         runCatching { playerFocusRequester.requestFocus() }
     }
 
-    // Auto-oculta a barra superior (< CATALOGO, CH -, CH +, título) após 4 segundos sem interação
+    // Auto-oculta a barra inferior (< CATALOGO, CH -, CH +, canal e EPG) após 5 segundos sem interação
     LaunchedEffect(controlsVisible, interactionTick) {
         if (controlsVisible) {
-            delay(4000L)
+            delay(5000L)
             controlsVisible = false
             runCatching { playerFocusRequester.requestFocus() }
         }
@@ -111,6 +118,9 @@ fun PlayerScreen(
             exoPlayer.release()
         }
     }
+
+    val currentProg = epgItems.firstOrNull { it.isCurrent } ?: epgItems.firstOrNull()
+    val nextPrograms = epgItems.filter { it !== currentProg }.take(2)
 
     Box(
         modifier = Modifier
@@ -171,61 +181,135 @@ fun PlayerScreen(
             visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter)
+            modifier = Modifier.align(Alignment.BottomCenter)
         ) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.72f))
+                    .background(Color.Black.copy(alpha = 0.84f))
                     .padding(horizontal = 18.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.White.copy(alpha = 0.14f))
-                        .heroFocusable(RoundedCornerShape(10.dp)) { onBack() }
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("< CATALOGO", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .heroFocusable(RoundedCornerShape(10.dp)) { onBack() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text("< CATALOGO", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .heroFocusable(RoundedCornerShape(10.dp)) {
+                                onStepChannel(-1)
+                                revealControlsTemporarily()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text("CH -", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .heroFocusable(RoundedCornerShape(10.dp)) {
+                                onStepChannel(1)
+                                revealControlsTemporarily()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text("CH +", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    Text(
+                        text = channelTitle.ifBlank { streamUrl ?: "Sem stream selecionado" },
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .heroFocusable(RoundedCornerShape(10.dp)) {
-                            onStepChannel(-1)
-                            revealControlsTemporarily()
+                HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+
+                if (isLoadingEpg) {
+                    Text(
+                        text = "Carregando programação (EPG)...",
+                        color = Color.White.copy(alpha = 0.72f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (currentProg != null) {
+                    val timeRange = listOf(currentProg.startTime, currentProg.endTime)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" - ")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (timeRange.isNotBlank()) "AGORA ($timeRange)" else "AGORA",
+                                color = Color(0xFF4ADE80),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = currentProg.title,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Text("CH -", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                }
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .heroFocusable(RoundedCornerShape(10.dp)) {
-                            onStepChannel(1)
-                            revealControlsTemporarily()
+                        if (nextPrograms.isNotEmpty()) {
+                            Column(modifier = Modifier.weight(1.3f)) {
+                                Text(
+                                    text = "A SEGUIR",
+                                    color = Color(0xFF38BDF8),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                nextPrograms.forEach { prog ->
+                                    val slot = if (prog.startTime.isNotBlank()) "${prog.startTime} • ${prog.title}" else prog.title
+                                    Text(
+                                        text = slot,
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Text("CH +", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                } else {
+                    Text(
+                        text = "EPG indisponível para este canal",
+                        color = Color.White.copy(alpha = 0.65f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-
-                Text(
-                    text = channelTitle.ifBlank { streamUrl ?: "Sem stream selecionado" },
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
             }
         }
     }
