@@ -28,6 +28,11 @@ data class MainUiState(
     val currentStreamUrl: String? = null,
     val currentChannelTitle: String = "",
     val isLoading: Boolean = false,
+    val loadingProgress: Float = 0f,
+    val loadingStage: String = "",
+    val profileLoadProgress: Float = 0f,
+    val profileLoadStage: String = "",
+    val isProfileLoading: Boolean = false,
     val bulkProgress: BulkProgress? = null,
     val errorMessage: String? = null,
     val successMessage: String? = null,
@@ -132,28 +137,71 @@ class MainViewModel(
         _uiState.update {
             it.copy(
                 isLoading = true,
+                loadingProgress = 0.12f,
+                loadingStage = "Conectando perfil e autenticando...",
+                isProfileLoading = true,
+                profileLoadProgress = 0.12f,
+                profileLoadStage = "Conectando perfil e carregando canais, filmes e séries...",
                 errorMessage = null,
                 successMessage = "Conectando perfil..."
             )
         }
         viewModelScope.launch {
+            val progressJob = launch {
+                val stages = listOf(
+                    0.28f to "Carregando canais ao vivo (TV)...",
+                    0.56f to "Carregando filmes (VOD)...",
+                    0.82f to "Carregando séries e temporadas..."
+                )
+                var idx = 0
+                while (true) {
+                    kotlinx.coroutines.delay(550L)
+                    val (targetProg, stageText) = stages[idx % stages.size]
+                    _uiState.update { st ->
+                        if (!st.isLoading) st
+                        else {
+                            val nextP = if (st.loadingProgress < targetProg) targetProg else (st.loadingProgress + 0.04f).coerceAtMost(0.92f)
+                            st.copy(
+                                loadingProgress = nextP,
+                                loadingStage = stageText,
+                                profileLoadProgress = nextP,
+                                profileLoadStage = stageText,
+                                successMessage = stageText
+                            )
+                        }
+                    }
+                    idx++
+                }
+            }
             try {
                 val count = repository.activateAndSyncProfile(profileId)
+                progressJob.cancel()
                 val active = repository.getActiveProfile()
                 activeProfile = active
                 activeProfileIdFlow.value = active?.id
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        loadingProgress = 1f,
+                        loadingStage = "Concluído ($count itens carregados)",
+                        isProfileLoading = false,
+                        profileLoadProgress = 1f,
+                        profileLoadStage = "Concluído ($count itens carregados)",
                         successMessage = "Perfil ${active?.name ?: ""} ativado ($count itens)."
                     )
                 }
                 onReady?.invoke()
             } catch (e: Exception) {
+                progressJob.cancel()
                 loadActiveProfile()
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        loadingProgress = 0f,
+                        loadingStage = "",
+                        isProfileLoading = false,
+                        profileLoadProgress = 0f,
+                        profileLoadStage = "",
                         successMessage = null,
                         errorMessage = "Erro ao carregar perfil: ${e.message ?: "Falha"}"
                     )
@@ -330,12 +378,25 @@ class MainViewModel(
         _uiState.update {
             it.copy(
                 isLoading = true,
+                loadingProgress = 0.2f,
+                loadingStage = "Autenticando Xtream e buscando canais, filmes e séries...",
+                isProfileLoading = true,
+                profileLoadProgress = 0.2f,
+                profileLoadStage = "Autenticando Xtream e buscando canais, filmes e séries...",
                 errorMessage = null,
                 successMessage = "Autenticando Xtream..."
             )
         }
         viewModelScope.launch {
             try {
+                _uiState.update {
+                    it.copy(
+                        loadingProgress = 0.55f,
+                        loadingStage = "Baixando canais, filmes e séries...",
+                        profileLoadProgress = 0.55f,
+                        profileLoadStage = "Baixando canais, filmes e séries..."
+                    )
+                }
                 val total = repository.loadXtreamData(server, user, pass)
                 val active = repository.getActiveProfile()
                 activeProfile = active
@@ -343,6 +404,11 @@ class MainViewModel(
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        loadingProgress = 1f,
+                        loadingStage = "Concluído ($total itens)",
+                        isProfileLoading = false,
+                        profileLoadProgress = 1f,
+                        profileLoadStage = "Concluído ($total itens)",
                         successMessage = "Xtream conectado (${active?.name})! $total itens."
                     )
                 }
@@ -350,6 +416,11 @@ class MainViewModel(
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        loadingProgress = 0f,
+                        loadingStage = "",
+                        isProfileLoading = false,
+                        profileLoadProgress = 0f,
+                        profileLoadStage = "",
                         successMessage = null,
                         errorMessage = "Erro Xtream: ${e.message ?: e.javaClass.simpleName}"
                     )
