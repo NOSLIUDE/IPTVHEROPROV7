@@ -221,7 +221,7 @@ fun MainScreen(
                 title = channel.title,
                 playlistTitles = validItems.map { it.title },
                 playlistUrls = validItems.map { it.url },
-                playlistRemoteIds = validItems.map { it.remoteId },
+                playlistRemoteIds = validItems.map { ch -> ch.remoteId },
                 startIndex = mappedIdx,
                 openFullscreen = true
             )
