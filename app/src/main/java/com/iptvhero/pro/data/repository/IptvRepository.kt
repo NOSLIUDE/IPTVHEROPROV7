@@ -1063,7 +1063,7 @@ class IptvRepository(
             val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
             return fmt.format(java.util.Date(sec * 1000L))
         }
-        val timeMatch = Regex("(\d{2}:\d{2})").find(raw)
+        val timeMatch = Regex("(\\d{2}:\\d{2})").find(raw)
         return timeMatch?.groupValues?.getOrNull(1) ?: ""
     }
 
