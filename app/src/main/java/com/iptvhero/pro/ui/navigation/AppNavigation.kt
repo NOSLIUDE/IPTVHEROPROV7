@@ -137,6 +137,8 @@ fun AppNavigation(
             PlayerScreen(
                 streamUrl = uiState.currentStreamUrl,
                 channelTitle = uiState.currentChannelTitle,
+                epgItems = uiState.currentEpgItems,
+                isLoadingEpg = uiState.isLoadingEpg,
                 onStepChannel = { delta -> viewModel.stepChannel(delta) },
                 onBack = {
                     viewModel.setStreamUrl(null, "")
