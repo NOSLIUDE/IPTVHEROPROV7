@@ -391,7 +391,7 @@ class MainViewModel(
                 }.ifEmpty { listOf(seriesChannel) }
 
                 val grouped = linkedMapOf<String, MutableList<SeriesEpisode>>()
-                val seRegex = Regex("(?i)(?:S|T)(\d{1,2})\s*(?:E|EP)?(\d{1,3})")
+                val seRegex = Regex("(?i)(?:S|T)(\\d{1,2})\\s*(?:E|EP)?(\\d{1,3})")
                 matching.forEachIndexed { idx, item ->
                     val m = seRegex.find(item.title)
                     val seasonKey = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.toString() ?: "1"
@@ -428,8 +428,8 @@ class MainViewModel(
 
     private fun extractSeriesBaseTitle(rawTitle: String): String {
         return rawTitle
-            .replace(Regex("(?i)\s*[-–:]?\s*(?:S|T)\d{1,2}\s*(?:E|EP)?\d{1,3}.*$"), "")
-            .replace(Regex("(?i)\s*Temporada\s*\d+.*$"), "")
+            .replace(Regex("(?i)\\s*[-–:]?\\s*(?:S|T)\\d{1,2}\\s*(?:E|EP)?\\d{1,3}.*$"), "")
+            .replace(Regex("(?i)\\s*Temporada\\s*\\d+.*$"), "")
             .trim()
             .ifBlank { rawTitle.trim() }
     }
