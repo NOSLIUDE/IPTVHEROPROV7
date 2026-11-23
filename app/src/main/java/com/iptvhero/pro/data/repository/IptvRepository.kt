@@ -265,9 +265,6 @@ class IptvRepository(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    /**
-     * Baixa o arquivo remoto com cache-bust (?t=timestamp) igual ao heroUrlWithBust() do index_2.html
-     */
     suspend fun fetchHeroListRaw(url: String = HERO_LIST_URL): Pair<String, List<String>> =
         withContext(Dispatchers.IO) {
             val clean = url.trim()
@@ -288,10 +285,6 @@ class IptvRepository(
             Pair(text, urls)
         }
 
-    /**
-     * Processa um lote de linhas (igual ao processBulk / processOneBulkLine do index_2.html),
-     * criando 1 perfil por linha valida com nome de heroi Marvel/DC, validade, conexoes e contagens.
-     */
     suspend fun processBulkLines(
         rawLines: List<String>,
         isHeroOrigin: Boolean = true,
@@ -349,9 +342,6 @@ class IptvRepository(
         Pair(successCount.get(), failedCount.get())
     }
 
-    /**
-     * Identico ao processOneBulkLine(line) do index_2.html
-     */
     private suspend fun processSingleBulkLine(line: String, bulkOrigin: Boolean): String {
         val creds = PlaylistParser.detectXtreamPure(line)
         if (creds != null) {
@@ -412,11 +402,6 @@ class IptvRepository(
         throw IllegalStateException("Nao reconhecido")
     }
 
-    /**
-     * Identico ao bulkLoadXtream(server, user, pass) do index_2.html:
-     * Valida credenciais, extrai exp_date, max_connections e contagens de live/vod/series
-     * sem sobrecarregar o banco antes do usuario clicar no card do perfil.
-     */
     private suspend fun bulkLoadXtreamProfileOnly(
         server: String,
         user: String,
@@ -463,10 +448,6 @@ class IptvRepository(
         return "${hero.name} (XTREAM) - perfil salvo"
     }
 
-    /**
-     * Identico ao activateProfile(id) do index_2.html:
-     * Ativa o perfil e reconecta automaticamente se for Xtream ou M3U remoto.
-     */
     suspend fun activateAndSyncProfile(profileId: Long): Int = withContext(Dispatchers.IO) {
         val profile = profileDao.getProfileById(profileId) ?: return@withContext 0
         profileDao.setActiveProfile(profileId)
@@ -541,9 +522,6 @@ class IptvRepository(
             items.size
         }
 
-    /**
-     * Identico ao loadXtreamData(server, user, pass, existingProfileId) do index_2.html
-     */
     suspend fun loadXtreamData(
         server: String,
         username: String,
@@ -570,7 +548,6 @@ class IptvRepository(
         val vodItems = mutableListOf<PlaylistItem>()
         val seriesItems = mutableListOf<PlaylistItem>()
 
-        // 1. LIVE
         runCatching {
             val cats = fetchJsonArray("$base&action=get_live_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_live_streams")
@@ -596,7 +573,6 @@ class IptvRepository(
             }
         }
 
-        // 2. VOD
         runCatching {
             val cats = fetchJsonArray("$base&action=get_vod_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_vod_streams")
@@ -623,7 +599,6 @@ class IptvRepository(
             }
         }
 
-        // 3. SERIES
         runCatching {
             val cats = fetchJsonArray("$base&action=get_series_categories").toCategoryMap()
             val streams = fetchJsonArray("$base&action=get_series")
@@ -725,9 +700,6 @@ class IptvRepository(
         )
     }
 
-    /**
-     * Carrega temporadas e episodios via get_series_info (identico ao loadSeriesInfo do index_2.html)
-     */
     suspend fun fetchSeriesSeasons(
         profile: ProfileEntity,
         seriesId: String
@@ -781,11 +753,6 @@ class IptvRepository(
         result
     }
 
-    /**
-     * Exporta todos os perfis no formato exato do exportProfilesTXT() do index_2.html:
-     * sourceType|sourceLabel|server|user|pass|validity|maxConnections|hero|live|vod|series
-     */
-
     @Volatile
     private var cachedXmltvKey: String? = null
     @Volatile
@@ -834,7 +801,6 @@ class IptvRepository(
                 if (jsonItems.isNotEmpty()) return@withContext jsonItems
             }
 
-            // Fallback XMLTV quando get_short_epg não retorna itens ou quando a fonte é M3U/XMLTV
             fetchXmltvFallback(profile, resolvedId, channelTitle)
         }
 
@@ -911,12 +877,18 @@ class IptvRepository(
     }
 
     private fun parseXmltvStream(reader: java.io.Reader): Map<String, List<XmltvProgramme>> {
-        val result = linkedMapOf<String, MutableList<XmltvProgramme>>()
+        val byChannelId = linkedMapOf<String, MutableList<XmltvProgramme>>()
+        val aliasToChannelId = linkedMapOf<String, String>()
         try {
             val parser = org.xmlpull.v1.XmlPullParserFactory.newInstance().newPullParser()
             parser.setInput(reader)
 
             var eventType = parser.eventType
+            var inChannel = false
+            var currentChannelId = ""
+            var inDisplayName = false
+            var displayNameText = ""
+
             var inProgramme = false
             var channelAttr = ""
             var startMs = 0L
@@ -930,6 +902,12 @@ class IptvRepository(
                 when (eventType) {
                     org.xmlpull.v1.XmlPullParser.START_TAG -> {
                         when (parser.name.lowercase()) {
+                            "channel" -> {
+                                inChannel = true
+                                currentChannelId = normalizeKey(parser.getAttributeValue(null, "id").orEmpty())
+                                displayNameText = ""
+                            }
+                            "display-name" -> if (inChannel) inDisplayName = true
                             "programme" -> {
                                 inProgramme = true
                                 channelAttr = normalizeKey(parser.getAttributeValue(null, "channel").orEmpty())
@@ -945,16 +923,31 @@ class IptvRepository(
                         }
                     }
                     org.xmlpull.v1.XmlPullParser.TEXT -> {
-                        if (inProgramme && inTitle) {
-                            titleText += parser.text.orEmpty()
-                        }
+                        val txt = parser.text.orEmpty()
+                        if (inChannel && inDisplayName) displayNameText += txt
+                        if (inProgramme && inTitle) titleText += txt
                     }
                     org.xmlpull.v1.XmlPullParser.END_TAG -> {
                         when (parser.name.lowercase()) {
+                            "display-name" -> {
+                                if (inChannel && currentChannelId.isNotBlank()) {
+                                    val normAlias = normalizeKey(displayNameText)
+                                    if (normAlias.isNotBlank()) {
+                                        aliasToChannelId[normAlias] = currentChannelId
+                                    }
+                                }
+                                inDisplayName = false
+                                displayNameText = ""
+                            }
+                            "channel" -> {
+                                inChannel = false
+                                inDisplayName = false
+                                currentChannelId = ""
+                            }
                             "title" -> inTitle = false
                             "programme" -> {
                                 if (inProgramme && channelAttr.isNotBlank() && titleText.isNotBlank()) {
-                                    result.getOrPut(channelAttr) { mutableListOf() }.add(
+                                    byChannelId.getOrPut(channelAttr) { mutableListOf() }.add(
                                         XmltvProgramme(
                                             channelKey = channelAttr,
                                             title = titleText.trim(),
@@ -976,14 +969,29 @@ class IptvRepository(
         } catch (_: Exception) {
             // Ignora XML malformado ou interrompido
         }
-        return result.mapValues { (_, list) -> list.sortedBy { it.startEpochMs } }
+
+        val merged = linkedMapOf<String, MutableList<XmltvProgramme>>()
+        byChannelId.forEach { (chKey, progs) ->
+            merged.getOrPut(chKey) { mutableListOf() }.addAll(progs)
+        }
+        aliasToChannelId.forEach { (aliasKey, chKey) ->
+            byChannelId[chKey]?.let { progs ->
+                merged.getOrPut(aliasKey) { mutableListOf() }.addAll(progs)
+            }
+        }
+        return merged.mapValues { (_, list) -> list.sortedBy { it.startEpochMs } }
     }
 
     private fun parseXmltvDateToEpochMs(raw: String): Long {
-        val digits = raw.takeWhile { it.isDigit() }
+        val trimmed = raw.trim()
+        val digits = trimmed.takeWhile { it.isDigit() }
         if (digits.length < 12) return 0L
         return try {
-            val sdf = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.getDefault())
+            val tzMatch = Regex("""([+-]\d{4})""").find(trimmed)
+            val tzId = tzMatch?.groupValues?.getOrNull(1)?.let { "GMT$it" } ?: "UTC"
+            val sdf = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone(tzId)
+            }
             val padded = digits.padEnd(14, '0').take(14)
             sdf.parse(padded)?.time ?: 0L
         } catch (_: Exception) {
