@@ -50,6 +50,13 @@ data class BulkProgress(
     val lastLog: String
 )
 
+data class EpgProgramItem(
+    val title: String,
+    val startTime: String = "",
+    val endTime: String = "",
+    val isCurrent: Boolean = false
+)
+
 data class SeriesEpisode(
     val id: String,
     val episodeNum: Int,
@@ -778,6 +785,288 @@ class IptvRepository(
      * Exporta todos os perfis no formato exato do exportProfilesTXT() do index_2.html:
      * sourceType|sourceLabel|server|user|pass|validity|maxConnections|hero|live|vod|series
      */
+
+    @Volatile
+    private var cachedXmltvKey: String? = null
+    @Volatile
+    private var cachedXmltvFetchedAt: Long = 0L
+    @Volatile
+    private var cachedXmltvPrograms: Map<String, List<XmltvProgramme>> = emptyMap()
+
+    private data class XmltvProgramme(
+        val channelKey: String,
+        val title: String,
+        val startEpochMs: Long,
+        val stopEpochMs: Long,
+        val startFormatted: String,
+        val endFormatted: String
+    )
+
+    suspend fun fetchShortEpg(
+        profile: ProfileEntity?,
+        streamUrl: String?,
+        remoteId: String?,
+        channelTitle: String = ""
+    ): List<EpgProgramItem> =
+        withContext(Dispatchers.IO) {
+            val baseServer = profile?.server?.trimEnd('/')
+            val user = profile?.user?.trim()
+            val pass = profile?.pass?.trim()
+            val resolvedId = remoteId?.takeIf { it.isNotBlank() } ?: extractStreamIdFromUrl(streamUrl)
+
+            if (!baseServer.isNullOrBlank() && !user.isNullOrBlank() && !pass.isNullOrBlank() && !resolvedId.isNullOrBlank()) {
+                val jsonItems = try {
+                    val encUser = URLEncoder.encode(user, "UTF-8")
+                    val encPass = URLEncoder.encode(pass, "UTF-8")
+                    val encId = URLEncoder.encode(resolvedId, "UTF-8")
+                    val apiUrl = "$baseServer/player_api.php?username=$encUser&password=$encPass&action=get_short_epg&stream_id=$encId"
+                    val req = Request.Builder().url(apiUrl).build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) emptyList()
+                        else {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.isBlank()) emptyList() else parseShortEpgJson(body)
+                        }
+                    }
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                if (jsonItems.isNotEmpty()) return@withContext jsonItems
+            }
+
+            // Fallback XMLTV quando get_short_epg não retorna itens ou quando a fonte é M3U/XMLTV
+            fetchXmltvFallback(profile, resolvedId, channelTitle)
+        }
+
+    private fun fetchXmltvFallback(
+        profile: ProfileEntity?,
+        resolvedId: String?,
+        channelTitle: String
+    ): List<EpgProgramItem> {
+        val xmltvUrl = resolveXmltvUrl(profile) ?: return emptyList()
+        val nowMs = System.currentTimeMillis()
+        val cacheValid = cachedXmltvKey == xmltvUrl && (nowMs - cachedXmltvFetchedAt) < 15 * 60 * 1000L
+
+        val grouped = if (cacheValid) {
+            cachedXmltvPrograms
+        } else {
+            val parsed = try {
+                val req = Request.Builder().url(xmltvUrl).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) emptyMap()
+                    else parseXmltvStream(resp.body?.charStream() ?: return@use emptyMap())
+                }
+            } catch (_: Exception) {
+                emptyMap()
+            }
+            if (parsed.isNotEmpty()) {
+                cachedXmltvKey = xmltvUrl
+                cachedXmltvFetchedAt = nowMs
+                cachedXmltvPrograms = parsed
+            }
+            parsed
+        }
+
+        if (grouped.isEmpty()) return emptyList()
+
+        val candidates = buildList {
+            if (!resolvedId.isNullOrBlank()) add(normalizeKey(resolvedId))
+            if (channelTitle.isNotBlank()) add(normalizeKey(channelTitle))
+        }.filter { it.isNotBlank() }
+
+        val matchedList = candidates.firstNotNullOfOrNull { key ->
+            grouped[key] ?: grouped.entries.firstOrNull { (k, _) ->
+                k.contains(key) || key.contains(k)
+            }?.value
+        }.orEmpty()
+
+        if (matchedList.isEmpty()) return emptyList()
+
+        val currentIdx = matchedList.indexOfFirst { it.startEpochMs <= nowMs && nowMs < it.stopEpochMs }
+            .let { idx -> if (idx >= 0) idx else matchedList.indexOfFirst { it.startEpochMs >= nowMs }.coerceAtLeast(0) }
+
+        return matchedList.drop(currentIdx).take(3).mapIndexed { index, prog ->
+            EpgProgramItem(
+                title = prog.title,
+                startTime = prog.startFormatted,
+                endTime = prog.endFormatted,
+                isCurrent = index == 0
+            )
+        }
+    }
+
+    private fun resolveXmltvUrl(profile: ProfileEntity?): String? {
+        val label = profile?.sourceLabel.orEmpty().trim()
+        if (label.startsWith("http://", true) || label.startsWith("https://", true)) {
+            if (label.contains("xmltv", ignoreCase = true) || label.endsWith(".xml", ignoreCase = true)) {
+                return label
+            }
+        }
+        val baseServer = profile?.server?.trimEnd('/') ?: return null
+        val user = profile?.user?.trim() ?: return null
+        val pass = profile?.pass?.trim() ?: return null
+        val encUser = URLEncoder.encode(user, "UTF-8")
+        val encPass = URLEncoder.encode(pass, "UTF-8")
+        return "$baseServer/xmltv.php?username=$encUser&password=$encPass"
+    }
+
+    private fun parseXmltvStream(reader: java.io.Reader): Map<String, List<XmltvProgramme>> {
+        val result = linkedMapOf<String, MutableList<XmltvProgramme>>()
+        try {
+            val parser = org.xmlpull.v1.XmlPullParserFactory.newInstance().newPullParser()
+            parser.setInput(reader)
+
+            var eventType = parser.eventType
+            var inProgramme = false
+            var channelAttr = ""
+            var startMs = 0L
+            var stopMs = 0L
+            var startFmt = ""
+            var endFmt = ""
+            var titleText = ""
+            var inTitle = false
+
+            while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                when (eventType) {
+                    org.xmlpull.v1.XmlPullParser.START_TAG -> {
+                        when (parser.name.lowercase()) {
+                            "programme" -> {
+                                inProgramme = true
+                                channelAttr = normalizeKey(parser.getAttributeValue(null, "channel").orEmpty())
+                                val startRaw = parser.getAttributeValue(null, "start").orEmpty()
+                                val stopRaw = parser.getAttributeValue(null, "stop").orEmpty()
+                                startMs = parseXmltvDateToEpochMs(startRaw)
+                                stopMs = parseXmltvDateToEpochMs(stopRaw)
+                                startFmt = formatXmltvClock(startRaw)
+                                endFmt = formatXmltvClock(stopRaw)
+                                titleText = ""
+                            }
+                            "title" -> if (inProgramme) inTitle = true
+                        }
+                    }
+                    org.xmlpull.v1.XmlPullParser.TEXT -> {
+                        if (inProgramme && inTitle) {
+                            titleText += parser.text.orEmpty()
+                        }
+                    }
+                    org.xmlpull.v1.XmlPullParser.END_TAG -> {
+                        when (parser.name.lowercase()) {
+                            "title" -> inTitle = false
+                            "programme" -> {
+                                if (inProgramme && channelAttr.isNotBlank() && titleText.isNotBlank()) {
+                                    result.getOrPut(channelAttr) { mutableListOf() }.add(
+                                        XmltvProgramme(
+                                            channelKey = channelAttr,
+                                            title = titleText.trim(),
+                                            startEpochMs = startMs,
+                                            stopEpochMs = stopMs,
+                                            startFormatted = startFmt,
+                                            endFormatted = endFmt
+                                        )
+                                    )
+                                }
+                                inProgramme = false
+                                inTitle = false
+                            }
+                        }
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (_: Exception) {
+            // Ignora XML malformado ou interrompido
+        }
+        return result.mapValues { (_, list) -> list.sortedBy { it.startEpochMs } }
+    }
+
+    private fun parseXmltvDateToEpochMs(raw: String): Long {
+        val digits = raw.takeWhile { it.isDigit() }
+        if (digits.length < 12) return 0L
+        return try {
+            val sdf = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.getDefault())
+            val padded = digits.padEnd(14, '0').take(14)
+            sdf.parse(padded)?.time ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    private fun formatXmltvClock(raw: String): String {
+        val digits = raw.takeWhile { it.isDigit() }
+        if (digits.length < 12) return ""
+        val hh = digits.substring(8, 10)
+        val mm = digits.substring(10, 12)
+        return "$hh:$mm"
+    }
+
+    private fun normalizeKey(input: String): String {
+        return input.lowercase()
+            .replace(Regex("[^a-z0-9]"), "")
+            .trim()
+    }
+
+    private fun extractStreamIdFromUrl(streamUrl: String?): String? {
+        if (streamUrl.isNullOrBlank()) return null
+        val clean = streamUrl.substringBefore("?")
+        val seg = clean.substringAfterLast("/").substringBefore(".")
+        return seg.takeIf { it.isNotBlank() && it.all { ch -> ch.isDigit() } }
+    }
+
+    private fun parseShortEpgJson(rawJson: String): List<EpgProgramItem> {
+        return try {
+            val root = JSONObject(rawJson)
+            val listings = root.optJSONArray("epg_listings") ?: return emptyList()
+            val items = mutableListOf<EpgProgramItem>()
+            for (i in 0 until listings.length()) {
+                val obj = listings.optJSONObject(i) ?: continue
+                val rawTitle = decodeBase64IfNeeded(obj.optString("title")).trim()
+                if (rawTitle.isBlank()) continue
+                val startRaw = obj.optString("start").ifBlank { obj.optString("start_timestamp") }
+                val endRaw = obj.optString("end").ifBlank { obj.optString("stop_timestamp") }
+                val startFmt = formatEpgTime(startRaw)
+                val endFmt = formatEpgTime(endRaw)
+                val hasNow = obj.optInt("has_now", 0) == 1 || obj.optString("now_playing") == "1"
+                items.add(
+                    EpgProgramItem(
+                        title = rawTitle,
+                        startTime = startFmt,
+                        endTime = endFmt,
+                        isCurrent = hasNow || (i == 0 && listings.length() > 0)
+                    )
+                )
+                if (items.size >= 4) break
+            }
+            if (items.isNotEmpty() && items.none { it.isCurrent }) {
+                items[0] = items[0].copy(isCurrent = true)
+            }
+            items
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun decodeBase64IfNeeded(value: String): String {
+        if (value.isBlank()) return ""
+        return try {
+            val decoded = android.util.Base64.decode(value, android.util.Base64.DEFAULT)
+            val str = String(decoded, Charsets.UTF_8)
+            if (str.isNotBlank() && str.all { it.code in 32..126 || it.code >= 160 }) str else value
+        } catch (_: Exception) {
+            value
+        }
+    }
+
+    private fun formatEpgTime(raw: String): String {
+        if (raw.isBlank()) return ""
+        if (raw.all { it.isDigit() } && raw.length >= 10) {
+            val sec = raw.take(10).toLongOrNull() ?: return ""
+            val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            return fmt.format(java.util.Date(sec * 1000L))
+        }
+        val timeMatch = Regex("(\d{2}:\d{2})").find(raw)
+        return timeMatch?.groupValues?.getOrNull(1) ?: ""
+    }
+
     fun formatProfilesExportTxt(profiles: List<ProfileEntity>): String {
         val lines = mutableListOf("# IPTV Hero Pro Profiles")
         for (p in profiles) {
