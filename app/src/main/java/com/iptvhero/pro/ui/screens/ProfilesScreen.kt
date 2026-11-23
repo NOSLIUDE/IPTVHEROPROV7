@@ -1,5 +1,6 @@
 package com.iptvhero.pro.ui.screens
 
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,13 +106,21 @@ fun ProfilesScreen(
                 )
             }
         } else {
+            val sortedProfiles = remember(profiles) {
+                profiles.sortedWith(
+                    compareBy<ProfileEntity> { extractProfileHost(it) }
+                        .thenByDescending { parseRemainingDays(it.validityIso) ?: Long.MIN_VALUE }
+                        .thenBy { it.name.lowercase() }
+                )
+            }
+
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 260.dp),
                 modifier = Modifier.weight(1f).padding(24.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(profiles, key = { it.id }) { profile ->
+                items(sortedProfiles, key = { it.id }) { profile ->
                     val isActive = profile.id == activeProfileId
                     val isMarvel = profile.universe.equals("marvel", ignoreCase = true)
                     val validityInfo = formatValidity(profile.validityIso)
@@ -185,11 +195,14 @@ fun ProfilesScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val hostLabel = extractProfileHost(profile).ifBlank { "sem-host" }
                                 Text(
-                                    text = "${profile.sourceType.uppercase()}${if (profile.bulkOrigin) " • LOTE" else ""}",
+                                    text = "$hostLabel • ${profile.sourceType.uppercase()}${if (profile.bulkOrigin) " • LOTE" else ""}",
                                     color = TextDim,
                                     fontSize = 11.sp,
-                                    letterSpacing = 1.sp
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    letterSpacing = 0.5.sp
                                 )
                             }
 
@@ -263,6 +276,36 @@ fun ProfilesScreen(
     }
 }
 
+private fun parseRemainingDays(validityIso: String?): Long? {
+    if (validityIso.isNullOrBlank()) return null
+    return try {
+        val exp = Instant.parse(validityIso)
+        ChronoUnit.DAYS.between(Instant.now(), exp)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun extractProfileHost(profile: ProfileEntity): String {
+    val rawCandidate = listOfNotNull(
+        profile.server?.takeIf { it.isNotBlank() },
+        profile.sourceLabel.takeIf { it.isNotBlank() }
+    ).firstOrNull().orEmpty().trim()
+
+    if (rawCandidate.isBlank()) return ""
+
+    val normalized = if (rawCandidate.contains("://")) rawCandidate else "http://$rawCandidate"
+    val parsedHost = runCatching { Uri.parse(normalized).host }.getOrNull().orEmpty()
+    val cleanHost = parsedHost.ifBlank {
+        rawCandidate
+            .substringAfter("://", rawCandidate)
+            .substringBefore("/")
+            .substringBefore("?")
+            .substringBefore(":")
+    }
+    return cleanHost.removePrefix("www.").lowercase().trim()
+}
+
 private fun formatValidity(validityIso: String?): Pair<String, Color> {
     if (validityIso.isNullOrBlank()) return Pair("Sem validade", TextDim)
     return try {
@@ -275,7 +318,7 @@ private fun formatValidity(validityIso: String?): Pair<String, Color> {
         when {
             days < 0 -> Pair("Expirado ($formatted)", Color(0xFFFF6B6E))
             days <= 7 -> Pair("${days}d restantes ($formatted)", Color(0xFFFFB347))
-            else -> Pair("Válido até $formatted", Color(0xFF4ADE80))
+            else -> Pair("${days}d • Válido até $formatted", Color(0xFF4ADE80))
         }
     } catch (_: Exception) {
         Pair("Sem validade", TextDim)
